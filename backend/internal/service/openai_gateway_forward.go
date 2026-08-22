@@ -104,6 +104,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	requestView := newOpenAIRequestView(body)
 	reqModel, reqStream, promptCacheKey := requestView.Model, requestView.Stream, requestView.PromptCacheKey
 	originalModel := reqModel
+	if updatedBody, changed, injectErr := injectOpenAIFastModelAliasServiceTier(account, reqModel, body); injectErr != nil {
+		return nil, fmt.Errorf("inject OpenAI fast model alias service tier: %w", injectErr)
+	} else if changed {
+		body = updatedBody
+		originalBody = updatedBody
+		requestView = newOpenAIRequestView(updatedBody)
+	}
 	nativeDeepSeekResponses := account.Platform == PlatformDeepseek &&
 		(account.GetAPIProtocol() == APIProtocolResponses || account.IsAdaptiveAPIProtocol())
 

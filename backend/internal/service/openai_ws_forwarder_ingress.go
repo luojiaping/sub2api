@@ -355,6 +355,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			imageSizeTier = imageCfg.SizeTier
 			imageInputSize = imageCfg.InputSize
 		}
+		if updated, changed, injectErr := injectOpenAIFastModelAliasServiceTier(account, originalModel, normalized); injectErr != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", injectErr)
+		} else if changed {
+			normalized = updated
+		}
 
 		// Apply OpenAI Fast Policy on the response.create frame using the same
 		// evaluator/normalize/scope rules as the HTTP entrypoints. This is the

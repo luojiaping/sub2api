@@ -1,6 +1,75 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/tidwall/gjson"
+)
+
+func TestShouldForceOpenAIFastForModelAlias(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gpt-5.6-luna-fast": "gpt-5.6-luna",
+			},
+		},
+	}
+
+	if !shouldForceOpenAIFastForModelAlias(account, "gpt-5.6-luna-fast") {
+		t.Fatal("mapped -fast alias should force the OpenAI Priority tier")
+	}
+	if shouldForceOpenAIFastForModelAlias(account, "gpt-5.6-luna") {
+		t.Fatal("mapped target model should remain standard when requested directly")
+	}
+	if shouldForceOpenAIFastForModelAlias(account, "gpt-5.6-luna-fast-unknown") {
+		t.Fatal("unmapped -fast model should not force the OpenAI Priority tier")
+	}
+	if shouldForceOpenAIFastForModelAlias(&Account{
+		Platform:    PlatformGrok,
+		Credentials: account.Credentials,
+	}, "gpt-5.6-luna-fast") {
+		t.Fatal("non-OpenAI accounts must not receive OpenAI service tiers")
+	}
+}
+
+func TestInjectOpenAIFastModelAliasServiceTier(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gpt-5.6-luna-fast": "gpt-5.6-luna",
+			},
+		},
+	}
+
+	updated, changed, err := injectOpenAIFastModelAliasServiceTier(account, "gpt-5.6-luna-fast", []byte(`{"model":"gpt-5.6-luna"}`))
+	if err != nil {
+		t.Fatalf("injectOpenAIFastModelAliasServiceTier returned error: %v", err)
+	}
+	if !changed {
+		t.Fatal("mapped -fast alias should change the request body")
+	}
+	if got := gjson.GetBytes(updated, "service_tier").String(); got != OpenAIFastTierPriority {
+		t.Fatalf("service_tier = %q, want %q", got, OpenAIFastTierPriority)
+	}
+
+	updated, changed, err = injectOpenAIFastModelAliasServiceTier(account, "gpt-5.6-luna-fast", []byte(`{"model":"gpt-5.6-luna","service_tier":"flex"}`))
+	if err != nil {
+		t.Fatalf("explicit client tier injection returned error: %v", err)
+	}
+	if !changed || gjson.GetBytes(updated, "service_tier").String() != OpenAIFastTierPriority {
+		t.Fatalf("explicit client tier was not forced to priority: changed=%v body=%s", changed, updated)
+	}
+
+	updated, changed, err = injectOpenAIFastModelAliasServiceTier(account, "gpt-5.6-luna", []byte(`{"model":"gpt-5.6-luna"}`))
+	if err != nil {
+		t.Fatalf("standard model injection returned error: %v", err)
+	}
+	if changed || string(updated) != `{"model":"gpt-5.6-luna"}` {
+		t.Fatalf("standard model was modified: changed=%v body=%s", changed, updated)
+	}
+}
 
 func TestResolveOpenAIForwardModel(t *testing.T) {
 	tests := []struct {

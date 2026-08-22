@@ -729,6 +729,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if capturedSessionModel != "" && capturedSessionModel != strings.TrimSpace(gjson.GetBytes(firstClientMessage, "model").String()) {
 		firstClientMessage = s.ReplaceModelInBody(firstClientMessage, capturedSessionModel)
 	}
+	if updated, changed, injectErr := injectOpenAIFastModelAliasServiceTier(account, initialRequestModel, firstClientMessage); injectErr != nil {
+		return fmt.Errorf("inject OpenAI fast model alias service tier on first ws frame: %w", injectErr)
+	} else if changed {
+		firstClientMessage = updated
+	}
 	usageMeta := newOpenAIWSPassthroughUsageMeta(initialRequestModel, firstClientMessage)
 	updatedFirst, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, capturedSessionModel, firstClientMessage)
 	if policyErr != nil {
@@ -993,6 +998,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					if upstreamModel = strings.TrimSpace(upstreamModel); upstreamModel != "" {
 						payload = s.ReplaceModelInBody(payload, upstreamModel)
 					}
+				}
+				if updated, changed, injectErr := injectOpenAIFastModelAliasServiceTier(account, requestModelForThisFrame, payload); injectErr != nil {
+					return payload, nil, injectErr
+				} else if changed {
+					payload = updated
 				}
 			}
 			// 在评估策略前先刷新 capturedSessionModel：客户端可能通过

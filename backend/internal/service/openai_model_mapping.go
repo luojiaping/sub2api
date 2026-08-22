@@ -1,6 +1,10 @@
 package service
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/tidwall/sjson"
+)
 
 // resolveOpenAIForwardModel 解析 OpenAI 兼容转发使用的模型。
 // messagesDispatchMappedModel 是调用方已为 /v1/messages 解析的显式调度结果；
@@ -19,6 +23,39 @@ func resolveOpenAIForwardModel(account *Account, requestedModel, messagesDispatc
 		return messagesDispatchMappedModel
 	}
 	return mappedModel
+}
+
+// shouldForceOpenAIFastForModelAlias limits gateway-owned Fast injection to an
+// explicit OpenAI model mapping whose public name ends in "-fast". The mapped
+// target is intentionally not inspected: the ordinary target model must remain
+// standard when requested directly.
+func shouldForceOpenAIFastForModelAlias(account *Account, requestedModel string) bool {
+	if account == nil || account.Platform != PlatformOpenAI {
+		return false
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return false
+	}
+	if _, matched := account.ResolveMappedModel(requestedModel); !matched {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(lastOpenAIModelSegment(requestedModel)), "-fast")
+}
+
+// injectOpenAIFastModelAliasServiceTier adds the gateway-owned Priority tier
+// before the existing Fast/Flex policy evaluates the request. This keeps the
+// existing policy UI and billing path authoritative while removing the need
+// for downstream clients to send service_tier themselves.
+func injectOpenAIFastModelAliasServiceTier(account *Account, requestedModel string, body []byte) ([]byte, bool, error) {
+	if !shouldForceOpenAIFastForModelAlias(account, requestedModel) || len(body) == 0 {
+		return body, false, nil
+	}
+	updated, err := sjson.SetBytes(body, "service_tier", OpenAIFastTierPriority)
+	if err != nil {
+		return body, false, err
+	}
+	return updated, true, nil
 }
 
 // openAIOAuthForeignModelPrefixes 列出明确属于其他厂商家族的模型名前缀。

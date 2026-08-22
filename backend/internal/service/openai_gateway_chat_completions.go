@@ -73,6 +73,15 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		})
 		return nil, errors.New("codex_cli_only restriction: only codex official clients are allowed")
 	}
+	if updatedBody, changed, injectErr := injectOpenAIFastModelAliasServiceTier(
+		account,
+		strings.TrimSpace(gjson.GetBytes(body, "model").String()),
+		body,
+	); injectErr != nil {
+		return nil, fmt.Errorf("inject OpenAI fast model alias service tier: %w", injectErr)
+	} else if changed {
+		body = updatedBody
+	}
 
 	if account.Platform == PlatformGrok {
 		if account.IsGrokOAuth() {
@@ -287,6 +296,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		return nil, policyErr
 	}
 	responsesBody = updatedBody
+	responsesReq.ServiceTier = gjson.GetBytes(responsesBody, "service_tier").String()
 
 	// 5. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)

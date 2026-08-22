@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -63,6 +64,9 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	chatReq.Model = upstreamModel
 	chatReq.ReasoningEffort = openAICompatAnthropicReasoningEffort(&anthropicReq, upstreamModel, chatReq.ReasoningEffort)
 	chatReq.Stream = clientStream
+	if shouldForceOpenAIFastForModelAlias(account, anthropicReq.Model) {
+		chatReq.ServiceTier = OpenAIFastTierPriority
+	}
 	if clientStream {
 		chatReq.StreamOptions = &apicompat.ChatStreamOptions{IncludeUsage: true}
 	}
@@ -87,10 +91,19 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 			}
 		}
 	}
-	// Unlike forwardResponsesViaRawChatCompletions, applyOpenAIFastPolicyToBody
-	// is intentionally skipped: Anthropic Messages bodies carry no service_tier,
-	// so the converted Chat Completions body never contains one and the policy
-	// would always be a no-op on this path.
+	if shouldForceOpenAIFastForModelAlias(account, anthropicReq.Model) {
+		updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, chatBody)
+		if policyErr != nil {
+			var blocked *OpenAIFastBlockedError
+			if errors.As(policyErr, &blocked) {
+				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+				writeAnthropicError(c, http.StatusForbidden, "forbidden_error", blocked.Message)
+			}
+			return nil, policyErr
+		}
+		chatBody = updatedBody
+	}
+	serviceTier = extractOpenAIServiceTierFromBody(chatBody)
 
 	logger.L().Debug("openai messages: forwarding via raw chat completions",
 		zap.Int64("account_id", account.ID),

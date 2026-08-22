@@ -168,6 +168,22 @@ func TestWSResponseCreate_NoServiceTierUntouched(t *testing.T) {
 	require.Equal(t, string(frame), string(updated), "no service_tier present must result in zero mutation")
 }
 
+func TestWSResponseCreate_MappedFastAliasInjectsPriority(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gpt-5.6-luna-fast": "gpt-5.6-luna",
+			},
+		},
+	}
+	frame := []byte(`{"type":"response.create","model":"gpt-5.6-luna"}`)
+	updated, changed, err := injectOpenAIFastModelAliasServiceTier(account, "gpt-5.6-luna-fast", frame)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, OpenAIFastTierPriority, gjson.GetBytes(updated, "service_tier").String())
+}
+
 func TestWSResponseCreate_NonResponseCreateFrameUntouched(t *testing.T) {
 	settings := &OpenAIFastPolicySettings{
 		Rules: []OpenAIFastPolicyRule{{

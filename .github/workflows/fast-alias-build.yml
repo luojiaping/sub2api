@@ -1,0 +1,81 @@
+name: Build Fast Alias Artifact
+
+on:
+  push:
+    branches:
+      - feat/openai-fast-alias-routing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Verify Go version
+        run: go version | grep -q 'go1.26.6'
+
+      - name: Check formatting
+        working-directory: backend
+        run: test -z "$(gofmt -l internal/service/openai_model_mapping.go internal/service/openai_gateway_forward.go internal/service/openai_gateway_chat_completions.go internal/service/openai_gateway_messages.go internal/service/openai_gateway_messages_chat_fallback.go internal/service/openai_ws_forwarder_ingress.go internal/service/openai_ws_v2_passthrough_adapter.go internal/service/openai_model_mapping_test.go internal/service/openai_fast_policy_ws_test.go)"
+
+      - name: Run focused tests
+        working-directory: backend
+        run: go test ./internal/service -run 'Test(ShouldForceOpenAIFastForModelAlias|InjectOpenAIFastModelAliasServiceTier|WSResponseCreate_MappedFastAliasInjectsPriority)$' -count=1
+
+      - name: Build Linux amd64 binary
+        working-directory: backend
+        env:
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || '' }}
+        run: |
+          mkdir -p dist
+          if [ -z "$BUILD_DATE" ]; then BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags=embed \
+            -trimpath \
+            -ldflags="-s -w -X main.Version=0.1.179-fast-alias -X main.Commit=${GITHUB_SHA} -X main.Date=${BUILD_DATE} -X main.BuildType=custom" \
+            -o dist/sub2api \
+            ./cmd/server
+          sha256sum dist/sub2api > dist/sub2api.sha256
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sub2api-fast-alias-linux-amd64-${{ github.sha }}
+          path: |
+            backend/dist/sub2api
+            backend/dist/sub2api.sha256
+          if-no-files-found: error
+          retention-days: 7

@@ -704,6 +704,23 @@ go generate ./cmd/server
 
 ---
 
+## OpenAI Fast 模型别名
+
+OpenAI 账号可以复用账号级 `model_mapping` 配置，将公开别名映射到已有上游模型：
+
+```json
+{
+  "gpt-5.6-luna-fast": "gpt-5.6-luna"
+}
+```
+
+当请求模型命中映射且公开名称以 `-fast` 结尾时，网关会在转发前写入
+`service_tier: "priority"`。现有 OpenAI Fast 策略仍会继续处理该值，计费读取策略处理后的 tier；Responses、Chat Completions、Messages 转换和 Responses WebSocket 均适用。
+
+直接请求 `gpt-5.6-luna` 不会触发该别名行为。客户端不需要发送 Fast 请求头或 `service_tier`，OAuth routing hint 也由网关根据最终 tier 生成。
+
+---
+
 ## 简易模式
 
 简易模式适合个人开发者或内部团队快速使用，不依赖完整 SaaS 功能。
