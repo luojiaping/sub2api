@@ -45,25 +45,66 @@ func RegisterGatewayRoutes(
 	requireGroupAnthropic := middleware.RequireGroupAssignment(settingService, middleware.AnthropicErrorWriter)
 	requireGroupGoogle := middleware.RequireGroupAssignment(settingService, middleware.GoogleErrorWriter)
 
-	isOpenAIResponsesCompatibleGatewayPlatform := func(c *gin.Context) bool {
-		switch getGroupPlatform(c) {
-		case service.PlatformOpenAI, service.PlatformGrok,
-			service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek:
-			// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与 openai/grok 一样经 OpenAI 网关转发。
-			return true
-		default:
-			return false
+	dispatchMessages := func(c *gin.Context) {
+		platform := routePlatformForMessagesEndpoint(c)
+		middleware.SetRoutePlatformIntent(c, platform)
+		if isOpenAICompatibleRoutePlatform(platform) {
+			h.OpenAIGateway.Messages(c)
+			return
+		}
+		h.Gateway.Messages(c)
+	}
+	dispatchOpenAICompatible := func(openAIHandler gin.HandlerFunc, anthropicHandler gin.HandlerFunc) gin.HandlerFunc {
+		return func(c *gin.Context) {
+			platform := routePlatformForOpenAICompatibleEndpoint(c)
+			middleware.SetRoutePlatformIntent(c, platform)
+			if isOpenAICompatibleRoutePlatform(platform) {
+				openAIHandler(c)
+				return
+			}
+			anthropicHandler(c)
 		}
 	}
 	countTokensHandler := func(c *gin.Context) {
-		switch getGroupPlatform(c) {
-		case service.PlatformOpenAI, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek:
+		platform := routePlatformForCountTokensEndpoint(c)
+		middleware.SetRoutePlatformIntent(c, platform)
+		if platform == service.PlatformOpenAI {
 			h.OpenAIGateway.CountTokens(c)
-		case service.PlatformGrok:
-			h.OpenAIGateway.GrokCountTokens(c)
-		default:
-			h.Gateway.CountTokens(c)
+			return
 		}
+		if platform == service.PlatformGrok {
+			h.OpenAIGateway.GrokCountTokens(c)
+			return
+		}
+		if platform == service.PlatformKimi || platform == service.PlatformZhipu || platform == service.PlatformDeepseek {
+			h.OpenAIGateway.CountTokens(c)
+			return
+		}
+		h.Gateway.CountTokens(c)
+	}
+	imagesHandler := func(c *gin.Context) {
+		platform := routePlatformForOpenAIMediaEndpoint(c)
+		middleware.SetRoutePlatformIntent(c, platform)
+		if platform == service.PlatformGrok {
+			h.OpenAIGateway.GrokImages(c)
+			return
+		}
+		if platform == service.PlatformOpenAI {
+			h.OpenAIGateway.Images(c)
+			return
+		}
+		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": gin.H{
+				"type":    "not_found_error",
+				"message": "Images API is not supported for this platform",
+			},
+		})
+	}
+	isOpenAIResponsesCompatibleGatewayPlatform := func(c *gin.Context) bool {
+		platform := routePlatformForOpenAICompatibleEndpoint(c)
+		middleware.SetRoutePlatformIntent(c, platform)
+		return isOpenAICompatibleRoutePlatform(platform)
 	}
 	modelsHandler := func(c *gin.Context) {
 		if c.Query("client_version") != "" {
@@ -76,26 +117,13 @@ func RegisterGatewayRoutes(
 		h.Gateway.Models(c)
 	}
 	isOpenAIOnlyEndpointGatewayPlatform := func(c *gin.Context) bool {
-		return getGroupPlatform(c) == service.PlatformOpenAI
-	}
-	imagesHandler := func(c *gin.Context) {
-		switch getGroupPlatform(c) {
-		case service.PlatformOpenAI:
-			h.OpenAIGateway.Images(c)
-		case service.PlatformGrok:
-			h.OpenAIGateway.GrokImages(c)
-		default:
-			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": gin.H{
-					"type":    "not_found_error",
-					"message": "Images API is not supported for this platform",
-				},
-			})
-		}
+		platform := routePlatformForOpenAICompatibleEndpoint(c)
+		middleware.SetRoutePlatformIntent(c, platform)
+		return platform == service.PlatformOpenAI
 	}
 	videoGenerationHandler := func(c *gin.Context) {
-		if getGroupPlatform(c) == service.PlatformGrok {
+		if hasAPIKeyPlatform(c, service.PlatformGrok) {
+			middleware.SetRoutePlatformIntent(c, service.PlatformGrok)
 			h.OpenAIGateway.GrokVideoGeneration(c)
 			return
 		}
@@ -111,7 +139,8 @@ func RegisterGatewayRoutes(
 		// Video status requests do not carry a model, so composite groups cannot
 		// be resolved by compositeTargetPlatformMiddleware. Route them through
 		// the Grok handler and let scheduler/account selection enforce capacity.
-		if getGroupPlatform(c) == service.PlatformGrok || getGroupPlatform(c) == service.PlatformComposite {
+		if hasAPIKeyPlatform(c, service.PlatformGrok) || getGroupPlatform(c) == service.PlatformGrok || getGroupPlatform(c) == service.PlatformComposite {
+			middleware.SetRoutePlatformIntent(c, service.PlatformGrok)
 			h.OpenAIGateway.GrokVideoStatus(c)
 			return
 		}
@@ -189,14 +218,8 @@ func RegisterGatewayRoutes(
 	gateway.Use(compositeTarget)
 	gateway.Use(requireGroupAnthropic)
 	{
-		// /v1/messages: auto-route based on group platform
-		gateway.POST("/messages", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Messages(c)
-				return
-			}
-			h.Gateway.Messages(c)
-		})
+		// /v1/messages: auto-route based on request model and authorized group platform.
+		gateway.POST("/messages", dispatchMessages)
 		// /v1/messages/count_tokens: OpenAI bridges upstream, Grok estimates
 		// locally, and Anthropic-compatible platforms retain their existing path.
 		gateway.POST("/messages/count_tokens", countTokensHandler)
@@ -207,33 +230,16 @@ func RegisterGatewayRoutes(
 		gateway.GET("/usage", h.Gateway.Usage)
 		gateway.POST("/live", h.OpenAIGateway.Live)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
-		// OpenAI Responses API: auto-route based on group platform
-		gateway.POST("/responses", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Responses(c)
-				return
-			}
-			h.Gateway.Responses(c)
-		})
-		gateway.POST("/responses/*subpath", guardResponsesSubpath(func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Responses(c)
-				return
-			}
-			h.Gateway.Responses(c)
-		}))
+		// OpenAI Responses API: auto-route based on request model and authorized group platform.
+		gateway.POST("/responses", dispatchOpenAICompatible(h.OpenAIGateway.Responses, h.Gateway.Responses))
+		gateway.POST("/responses/*subpath", guardResponsesSubpath(dispatchOpenAICompatible(h.OpenAIGateway.Responses, h.Gateway.Responses)))
 		gateway.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 		gateway.GET("/responses", func(c *gin.Context) {
+			middleware.SetRoutePlatformIntent(c, routePlatformForOpenAICompatibleEndpoint(c))
 			h.OpenAIGateway.ResponsesWebSocket(c)
 		})
-		// OpenAI Chat Completions API: auto-route based on group platform
-		gateway.POST("/chat/completions", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.ChatCompletions(c)
-				return
-			}
-			h.Gateway.ChatCompletions(c)
-		})
+		// OpenAI Chat Completions API: auto-route based on request model and authorized group platform.
+		gateway.POST("/chat/completions", dispatchOpenAICompatible(h.OpenAIGateway.ChatCompletions, h.Gateway.ChatCompletions))
 		gateway.POST("/embeddings", textBodyLimit, func(c *gin.Context) {
 			if !isOpenAIOnlyEndpointGatewayPlatform(c) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
@@ -281,7 +287,7 @@ func RegisterGatewayRoutes(
 		// Not part of the creation-center product surface — gateway relay only.
 		voiceHandler := func(endpoint string) gin.HandlerFunc {
 			return func(c *gin.Context) {
-				if getGroupPlatform(c) != service.PlatformGrok {
+				if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 					c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
 					return
@@ -293,7 +299,7 @@ func RegisterGatewayRoutes(
 		gateway.POST("/stt", voiceHandler("stt"))
 		gateway.POST("/custom-voices", voiceHandler("custom-voices"))
 		customVoicePathHandler := func(c *gin.Context) {
-			if getGroupPlatform(c) != service.PlatformGrok {
+			if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
 				return
@@ -306,7 +312,7 @@ func RegisterGatewayRoutes(
 		gateway.PATCH("/custom-voices/:voice_id", customVoicePathHandler)
 		gateway.DELETE("/custom-voices/:voice_id", customVoicePathHandler)
 		gateway.GET("/realtime", func(c *gin.Context) {
-			if getGroupPlatform(c) != service.PlatformGrok {
+			if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Realtime API is not supported for this platform"}})
 				return
@@ -314,7 +320,7 @@ func RegisterGatewayRoutes(
 			h.OpenAIGateway.GrokRealtime(c)
 		})
 		gateway.POST("/web_search", func(c *gin.Context) {
-			if getGroupPlatform(c) != service.PlatformGrok {
+			if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Web Search API is not supported for this platform"}})
 				return
@@ -322,7 +328,7 @@ func RegisterGatewayRoutes(
 			h.Gateway.WebSearch(c)
 		})
 		gateway.POST("/x_search", func(c *gin.Context) {
-			if getGroupPlatform(c) != service.PlatformGrok {
+			if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "X Search API is not supported for this platform"}})
 				return
@@ -348,17 +354,12 @@ func RegisterGatewayRoutes(
 	}
 
 	// OpenAI Responses API（不带v1前缀的别名）— auto-route based on group platform
-	responsesHandler := func(c *gin.Context) {
-		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-			h.OpenAIGateway.Responses(c)
-			return
-		}
-		h.Gateway.Responses(c)
-	}
+	responsesHandler := dispatchOpenAICompatible(h.OpenAIGateway.Responses, h.Gateway.Responses)
 	r.POST("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, responsesHandler)
 	r.POST("/responses/*subpath", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, guardResponsesSubpath(responsesHandler))
 	r.POST("/alpha/search", textBodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, h.OpenAIGateway.AlphaSearch)
 	r.GET("/responses", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
+		middleware.SetRoutePlatformIntent(c, routePlatformForOpenAICompatibleEndpoint(c))
 		h.OpenAIGateway.ResponsesWebSocket(c)
 	})
 	r.GET("/models", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, modelsHandler)
@@ -372,18 +373,13 @@ func RegisterGatewayRoutes(
 		codexDirect.POST("/responses/*subpath", guardResponsesSubpath(responsesHandler))
 		codexDirect.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 		codexDirect.GET("/responses", func(c *gin.Context) {
+			middleware.SetRoutePlatformIntent(c, routePlatformForOpenAICompatibleEndpoint(c))
 			h.OpenAIGateway.ResponsesWebSocket(c)
 		})
 		codexDirect.GET("/models", h.OpenAIGateway.CodexModels)
 	}
 	// OpenAI Chat Completions API（不带v1前缀的别名）— auto-route based on group platform
-	r.POST("/chat/completions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
-		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-			h.OpenAIGateway.ChatCompletions(c)
-			return
-		}
-		h.Gateway.ChatCompletions(c)
-	})
+	r.POST("/chat/completions", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, dispatchOpenAICompatible(h.OpenAIGateway.ChatCompletions, h.Gateway.ChatCompletions))
 	r.POST("/embeddings", textBodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
 		if !isOpenAIOnlyEndpointGatewayPlatform(c) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
@@ -417,7 +413,7 @@ func RegisterGatewayRoutes(
 
 	rootVoiceHandler := func(endpoint string) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			if getGroupPlatform(c) != service.PlatformGrok {
+			if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
 				return
@@ -429,7 +425,7 @@ func RegisterGatewayRoutes(
 	r.POST("/stt", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, rootVoiceHandler("stt"))
 	r.POST("/custom-voices", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, rootVoiceHandler("custom-voices"))
 	rootCustomVoicePathHandler := func(c *gin.Context) {
-		if getGroupPlatform(c) != service.PlatformGrok {
+		if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Voice API is not supported for this platform"}})
 			return
@@ -442,7 +438,7 @@ func RegisterGatewayRoutes(
 	r.PATCH("/custom-voices/:voice_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, rootCustomVoicePathHandler)
 	r.DELETE("/custom-voices/:voice_id", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, rootCustomVoicePathHandler)
 	r.GET("/realtime", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
-		if getGroupPlatform(c) != service.PlatformGrok {
+		if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Realtime API is not supported for this platform"}})
 			return
@@ -450,7 +446,7 @@ func RegisterGatewayRoutes(
 		h.OpenAIGateway.GrokRealtime(c)
 	})
 	r.POST("/web_search", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
-		if getGroupPlatform(c) != service.PlatformGrok {
+		if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Web Search API is not supported for this platform"}})
 			return
@@ -458,7 +454,7 @@ func RegisterGatewayRoutes(
 		h.Gateway.WebSearch(c)
 	})
 	r.POST("/x_search", bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), compositeTarget, requireGroupAnthropic, func(c *gin.Context) {
-		if getGroupPlatform(c) != service.PlatformGrok {
+		if !hasAPIKeyPlatform(c, service.PlatformGrok) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
 			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "X Search API is not supported for this platform"}})
 			return
@@ -713,4 +709,152 @@ func compositeRouteEndpointForPath(path string) string {
 	default:
 		return service.CompositeRouteEndpointAny
 	}
+}
+
+func hasAPIKeyPlatform(c *gin.Context, platform string) bool {
+	apiKey, ok := middleware.GetAPIKeyFromContext(c)
+	if !ok {
+		return false
+	}
+	return service.APIKeyHasCandidateGroup(apiKey, platform)
+}
+
+func routePlatformForMessagesEndpoint(c *gin.Context) string {
+	model := normalizedRequestModel(c)
+	if requestModelLooksGrok(model) && hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	if requestModelLooksOpenAI(model) && hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if hasAPIKeyPlatform(c, service.PlatformAnthropic) {
+		return service.PlatformAnthropic
+	}
+	if hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	return getGroupPlatform(c)
+}
+
+func routePlatformForOpenAICompatibleEndpoint(c *gin.Context) string {
+	model := normalizedRequestModel(c)
+	if requestModelLooksAnthropic(model) && hasAPIKeyPlatform(c, service.PlatformAnthropic) {
+		return service.PlatformAnthropic
+	}
+	if requestModelLooksGrok(model) && hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	if requestModelLooksOpenAI(model) && hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	if hasAPIKeyPlatform(c, service.PlatformAnthropic) {
+		return service.PlatformAnthropic
+	}
+	return getGroupPlatform(c)
+}
+
+func routePlatformForCountTokensEndpoint(c *gin.Context) string {
+	model := normalizedRequestModel(c)
+	if requestModelLooksAnthropic(model) && hasAPIKeyPlatform(c, service.PlatformAnthropic) {
+		return service.PlatformAnthropic
+	}
+	if requestModelLooksOpenAI(model) && hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if requestModelLooksGrok(model) && hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	if hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if hasAPIKeyPlatform(c, service.PlatformAnthropic) {
+		return service.PlatformAnthropic
+	}
+	if hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	return getGroupPlatform(c)
+}
+
+func routePlatformForOpenAIMediaEndpoint(c *gin.Context) string {
+	model := normalizedRequestModel(c)
+	if requestModelLooksGrok(model) && hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	if hasAPIKeyPlatform(c, service.PlatformOpenAI) {
+		return service.PlatformOpenAI
+	}
+	if hasAPIKeyPlatform(c, service.PlatformGrok) {
+		return service.PlatformGrok
+	}
+	return getGroupPlatform(c)
+}
+
+func isOpenAICompatibleRoutePlatform(platform string) bool {
+	switch platform {
+	case service.PlatformOpenAI, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek:
+		return true
+	default:
+		return false
+	}
+}
+
+func requestModelLooksOpenAICompatible(c *gin.Context) bool {
+	model := normalizedRequestModel(c)
+	return requestModelLooksOpenAI(model) || requestModelLooksGrok(model)
+}
+
+func normalizedRequestModel(c *gin.Context) string {
+	return strings.ToLower(strings.TrimSpace(peekJSONRequestModel(c)))
+}
+
+func requestModelLooksOpenAI(model string) bool {
+	return strings.HasPrefix(model, "gpt-") ||
+		strings.HasPrefix(model, "chatgpt-") ||
+		strings.HasPrefix(model, "codex") ||
+		strings.HasPrefix(model, "o1") ||
+		strings.HasPrefix(model, "o3") ||
+		strings.HasPrefix(model, "o4") ||
+		strings.HasPrefix(model, "openai/")
+}
+
+func requestModelLooksGrok(model string) bool {
+	return strings.HasPrefix(model, "grok") ||
+		strings.HasPrefix(model, "xai/") ||
+		strings.HasPrefix(model, "x-ai/") ||
+		strings.HasPrefix(model, "grok/") ||
+		strings.HasPrefix(model, "imagine") ||
+		strings.HasPrefix(model, "composer")
+}
+
+func requestModelLooksAnthropic(model string) bool {
+	return strings.HasPrefix(model, "claude") ||
+		strings.HasPrefix(model, "anthropic/claude") ||
+		strings.HasPrefix(model, "sonnet") ||
+		strings.HasPrefix(model, "opus") ||
+		strings.HasPrefix(model, "haiku")
+}
+
+func peekJSONRequestModel(c *gin.Context) string {
+	if c == nil || c.Request == nil || c.Request.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return ""
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return ""
+	}
+	return gjson.GetBytes(body, "model").String()
 }

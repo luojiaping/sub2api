@@ -115,7 +115,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	setOpsEndpointContext(c, "", int16(service.RequestTypeSync))
 
 	if endpoint.IsGenerationRequest() {
-		if !service.GroupAllowsImageGeneration(apiKey.Group) {
+		if group := singleOpenAICompatibleCandidateGroup(apiKey, service.PlatformGrok); group != nil && !service.GroupAllowsImageGeneration(group) {
 			h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 			return
 		}
@@ -148,16 +148,6 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	}
 	if userReleaseFunc != nil {
 		defer userReleaseFunc()
-	}
-
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("grok_media.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.errorResponse(c, status, code, message)
-		return
 	}
 
 	sessionSeed := body
@@ -203,9 +193,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		if failoverClientGone(c) {
 			return
 		}
-		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
+		resolvedSelection, scheduleDecision, err := h.gatewayService.SelectOpenAIAccountWithSchedulerForAPIKey(
 			requestCtx,
-			apiKey.GroupID,
+			apiKey,
 			"",
 			sessionHash,
 			routingModel,
@@ -213,10 +203,15 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			service.OpenAIUpstreamTransportHTTPSSE,
 			requiredCapability,
 			false,
-			false,
-			false,
 			service.PlatformGrok,
+			false,
+			false,
 		)
+		var selection *service.AccountSelectionResult
+		currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+		if resolvedSelection != nil {
+			selection = resolvedSelection.Selection
+		}
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("grok_media.account_select_aborted_client_disconnected", zap.Error(err))
@@ -266,6 +261,26 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				zap.Int64("selected_account_id", selection.Account.ID),
 			)
 			h.errorResponse(c, http.StatusNotFound, "not_found_error", "Video request not found")
+			return
+		}
+		apiKey = currentAPIKey
+		if endpoint.IsGenerationRequest() && !service.GroupAllowsImageGeneration(currentAPIKey.Group) {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
+			return
+		}
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), currentAPIKey.User, currentAPIKey, currentAPIKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), currentAPIKey)); err != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			reqLog.Info("grok_media.billing_eligibility_check_failed", zap.Error(err), zap.Any("group_id", currentAPIKey.GroupID))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.errorResponse(c, status, code, message)
 			return
 		}
 
@@ -412,7 +427,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, grokMediaScheduleModel(account, routingModel, result), true, nil)
 		if isGrokVideoCreateEndpoint(endpoint) && strings.TrimSpace(result.ResponseID) != "" {
 			if err := h.gatewayService.BindGrokMediaVideoRequestAccount(
-				requestCtx, apiKey.GroupID, result.ResponseID, subject.UserID, apiKey.ID, account.ID,
+				requestCtx, currentAPIKey.GroupID, result.ResponseID, subject.UserID, currentAPIKey.ID, account.ID,
 			); err != nil {
 				reqLog.Warn("grok_media.bind_video_request_account_failed",
 					zap.Int64("account_id", account.ID),

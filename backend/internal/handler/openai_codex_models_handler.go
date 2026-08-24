@@ -23,11 +23,11 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 		return
 	}
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
-	if !ok || apiKey.Group == nil {
+	if !ok || apiKey == nil {
 		h.errorResponse(c, http.StatusUnauthorized, "invalid_request_error", "API key group is required")
 		return
 	}
-	if apiKey.Group.Platform != service.PlatformOpenAI && apiKey.Group.Platform != service.PlatformComposite {
+	if !service.APIKeyHasCandidateGroup(apiKey, service.PlatformOpenAI) && (apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite) {
 		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Codex models manifest is only available for OpenAI and Composite groups")
 		return
 	}
@@ -41,7 +41,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 	var lastUpstreamErr error
 
 	for {
-		account, err := h.gatewayService.SelectAccountForModelWithExclusions(c.Request.Context(), apiKey.GroupID, "", "", failedAccountIDs)
+		resolvedSelection, err := h.gatewayService.SelectAccountForModelForAPIKey(c.Request.Context(), apiKey, service.PlatformOpenAI, "", "", failedAccountIDs)
 		if err != nil {
 			if c.Request.Context().Err() != nil {
 				return
@@ -52,6 +52,14 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			}
 			h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI accounts")
 			return
+		}
+		if resolvedSelection == nil || resolvedSelection.Selection == nil || resolvedSelection.Selection.Account == nil {
+			h.errorResponse(c, http.StatusServiceUnavailable, "upstream_error", "No available OpenAI accounts")
+			return
+		}
+		account := resolvedSelection.Selection.Account
+		if resolvedSelection.APIKey != nil {
+			apiKey = resolvedSelection.APIKey
 		}
 		// 让 ops 错误日志携带实际选中的上游账号，便于定位失效账号（#4544）。
 		setOpsSelectedAccount(c, account.ID, account.Platform)

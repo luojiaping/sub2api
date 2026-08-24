@@ -69,7 +69,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		return
 	}
 
-	if apiKey.Group == nil || apiKey.Group.Platform != "grok" {
+	if !service.APIKeyHasCandidateGroup(apiKey, service.PlatformGrok) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 			"type":    "invalid_request_error",
 			"message": searchLabel + " is only supported for grok groups",
@@ -77,16 +77,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		return
 	}
 
-	// Billing eligibility (same as other requests)
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		c.JSON(status, gin.H{"error": gin.H{"type": code, "message": message}})
-		return
-	}
 
 	subject, _ := middleware2.GetAuthSubjectFromContext(c)
 	reqLog := requestLogger(c, "handler.gateway.web_search")
@@ -113,16 +104,6 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		return
 	}
 
-	// Use exactly the same scheduling as other requests (SelectAccountWithLoadAwareness handles load, rate limit, sticky, etc.)
-	groupID := apiKey.GroupID
-	if groupID == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"type":    "invalid_request_error",
-			"message": "group required",
-		}})
-		return
-	}
-
 	failedAccounts := make(map[int64]struct{})
 	var account *service.Account
 	var accountReleaseFunc func()
@@ -139,8 +120,8 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 
 	// First attempt + up to 3 failover accounts (max 4 total).
 	for attempt := 0; attempt < 4; attempt++ {
-		selected, selectErr := h.gatewayService.SelectAccountWithLoadAwareness(
-			c.Request.Context(), groupID, "", searchModel, failedAccounts, "", 0,
+		resolvedSelection, selectErr := h.gatewayService.SelectAccountWithLoadAwarenessForAPIKey(
+			c.Request.Context(), apiKey, service.PlatformGrok, "", searchModel, failedAccounts, "", 0,
 		)
 		if selectErr != nil {
 			if attempt == 0 {
@@ -152,7 +133,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			}
 			break
 		}
-		if selected == nil || selected.Account == nil {
+		if resolvedSelection == nil || resolvedSelection.Selection == nil || resolvedSelection.Selection.Account == nil {
 			if attempt == 0 {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
 					"type":    "scheduling_error",
@@ -161,6 +142,21 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 				return
 			}
 			break
+		}
+		selected := resolvedSelection.Selection
+		if resolvedSelection.APIKey != nil {
+			apiKey = resolvedSelection.APIKey
+		}
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+			if selected.ReleaseFunc != nil {
+				selected.ReleaseFunc()
+			}
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			c.JSON(status, gin.H{"error": gin.H{"type": code, "message": message}})
+			return
 		}
 
 		release, acquireOK, acquireErr := h.acquireWebSearchAccountSlot(c, selected)

@@ -160,7 +160,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		if abortIfAPIKeyGroupUnavailable(c, apiKey) {
 			return
 		}
-		if abortIfAPIKeyGroupNotAllowed(c, apiKey) {
+		if abortIfAPIKeyGroupNotAllowed(c, apiKey, subscriptionService) {
 			return
 		}
 		ctx := context.WithValue(c.Request.Context(), ctxkey.UserID, apiKey.User.ID)
@@ -413,8 +413,8 @@ func abortIfAPIKeyGroupUnavailable(c *gin.Context, apiKey *service.APIKey) bool 
 	return true
 }
 
-func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey) bool {
-	if validateAPIKeyGroupAllowed(apiKey) {
+func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey, subscriptionService *service.SubscriptionService) bool {
+	if authorizeAPIKeyGroups(c, apiKey, subscriptionService) {
 		return false
 	}
 	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonAPIKeyGroupUnavailable)
@@ -424,18 +424,85 @@ func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey) bool {
 }
 
 func validateAPIKeyGroupAllowed(apiKey *service.APIKey) bool {
-	if apiKey == nil || apiKey.GroupID == nil || apiKey.User == nil || apiKey.Group == nil {
+	if apiKey == nil || apiKey.User == nil {
 		return true
 	}
-	group := apiKey.Group
-	if group.IsSubscriptionType() {
+	groups := service.APIKeyCandidateGroups(apiKey, "")
+	if len(groups) == 0 {
+		return apiKey.GroupID == nil && len(apiKey.GroupIDs) == 0 && apiKey.Group == nil && len(apiKey.Groups) == 0
+	}
+	for i := range groups {
+		group := &groups[i]
+		if !group.IsSubscriptionType() && apiKey.User.CanBindGroup(group.ID, group.IsExclusive) {
+			return true
+		}
+		if group.IsSubscriptionType() {
+			return true
+		}
+	}
+	return false
+}
+
+func authorizeAPIKeyGroups(c *gin.Context, apiKey *service.APIKey, subscriptionService *service.SubscriptionService) bool {
+	if apiKey == nil || apiKey.User == nil {
 		return true
 	}
-	return apiKey.User.CanBindGroup(group.ID, group.IsExclusive)
+	boundGroups := service.APIKeyBoundGroups(apiKey)
+	if len(boundGroups) == 0 {
+		return apiKey.GroupID == nil && len(apiKey.GroupIDs) == 0 && apiKey.Group == nil && len(apiKey.Groups) == 0
+	}
+
+	authorized := make([]service.Group, 0, len(boundGroups))
+	for i := range boundGroups {
+		group := boundGroups[i]
+		if group.Status != "" && !group.IsActive() {
+			continue
+		}
+		if group.IsSubscriptionType() {
+			if subscriptionService == nil {
+				continue
+			}
+			if _, err := subscriptionService.GetActiveSubscription(c.Request.Context(), apiKey.User.ID, group.ID); err != nil {
+				continue
+			}
+		} else if !apiKey.User.CanBindGroup(group.ID, group.IsExclusive) {
+			continue
+		}
+		authorized = append(authorized, group)
+	}
+	if len(authorized) == 0 {
+		return false
+	}
+
+	apiKey.Groups = authorized
+	apiKey.GroupIDs = make([]int64, 0, len(authorized))
+	for i := range authorized {
+		apiKey.GroupIDs = append(apiKey.GroupIDs, authorized[i].ID)
+	}
+	groupID := authorized[0].ID
+	apiKey.GroupID = &groupID
+	apiKey.Group = &apiKey.Groups[0]
+	return true
 }
 
 func validateAPIKeyGroupAvailable(apiKey *service.APIKey) (string, string, bool) {
 	if apiKey == nil || apiKey.GroupID == nil {
+		return "", "", true
+	}
+	groups := service.APIKeyBoundGroups(apiKey)
+	for i := range groups {
+		if groups[i].Status == "" || groups[i].IsActive() {
+			return "", "", true
+		}
+	}
+	if len(groups) > 0 {
+		group := &groups[0]
+		if group == nil || strings.EqualFold(group.Status, "deleted") {
+			return "GROUP_DELETED", "API Key 所属分组已删除", false
+		}
+		return "GROUP_DISABLED", "API Key 所属分组已停用", false
+	}
+	if apiKey.GroupID == nil {
 		return "", "", true
 	}
 	group := apiKey.Group

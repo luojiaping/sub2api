@@ -96,11 +96,8 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	pricingCtx, pricingAt := service.WithGatewayTokenRequestPricing(c.Request.Context())
 	c.Request = c.Request.WithContext(pricingCtx)
 
-	// 解析渠道级模型映射
-	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
-
 	// Claude Code only restriction
-	if apiKey.Group != nil && apiKey.Group.ClaudeCodeOnly {
+	if group := service.APIKeyOnlyCandidateGroup(apiKey, ""); group != nil && group.ClaudeCodeOnly {
 		h.chatCompletionsErrorResponse(c, http.StatusForbidden, "permission_error",
 			"This group is restricted to Claude Code clients (/v1/messages only)")
 		return
@@ -131,17 +128,6 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		defer userReleaseFunc()
 	}
 
-	// 2. Re-check billing
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("gateway.cc.billing_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.chatCompletionsErrorResponse(c, status, code, message)
-		return
-	}
-
 	// Parse request for session hash
 	bodyRef := service.NewRequestBodyRef(body)
 	parsedReq, _ := service.ParseGatewayRequest(bodyRef, "chat_completions")
@@ -154,7 +140,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		APIKeyID:  apiKey.ID,
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
-	groupPlatform := effectiveAPIKeyPlatform(c, apiKey)
+	routePlatform := ""
+	if value, ok := middleware2.GetRoutePlatformIntentFromContext(c); ok {
+		routePlatform = value
+	}
+	groupPlatform := gatewayRequestPlatformForAPIKey(apiKey, "", routePlatform)
 	selectionSessionHash := sessionHash
 	if groupPlatform == service.PlatformGemini && selectionSessionHash != "" {
 		selectionSessionHash = "gemini:" + selectionSessionHash
@@ -169,7 +159,12 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if c.Request.Context().Err() != nil {
 			return
 		}
-		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+		resolvedSelection, err := h.gatewayService.SelectAccountWithLoadAwarenessForAPIKey(c.Request.Context(), apiKey, groupPlatform, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+		var selection *service.AccountSelectionResult
+		currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+		if resolvedSelection != nil {
+			selection = resolvedSelection.Selection
+		}
 		if err != nil {
 			if len(fs.FailedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, groupPlatform)
@@ -199,6 +194,28 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 		}
+		if currentAPIKey.Group != nil && currentAPIKey.Group.ClaudeCodeOnly {
+			if selection != nil && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			h.chatCompletionsErrorResponse(c, http.StatusForbidden, "permission_error",
+				"This group is restricted to Claude Code clients (/v1/messages only)")
+			return
+		}
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), currentAPIKey.User, currentAPIKey, currentAPIKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), currentAPIKey)); err != nil {
+			if selection != nil && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			reqLog.Info("gateway.cc.billing_check_failed", zap.Error(err), zap.Any("group_id", currentAPIKey.GroupID))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.chatCompletionsErrorResponse(c, status, code, message)
+			return
+		}
+		channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), currentAPIKey.GroupID, reqModel)
+		parsedReq.GroupID = currentAPIKey.GroupID
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
@@ -242,7 +259,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		account = latest
 		selection.Account = latest
 		if selection.ProfitGateActive() {
-			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, selectionSessionHash, account.ID); err != nil {
+			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, currentAPIKey.GroupID, selectionSessionHash, account.ID); err != nil {
 				reqLog.Warn("gateway.cc.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
 		}
@@ -331,14 +348,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		inboundEndpoint := GetInboundEndpoint(c)
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
 
-		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+		quotaPlatform := service.QuotaPlatform(c.Request.Context(), currentAPIKey)
 		sessionID := service.ExtractClientSessionID(c)
 		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
 				Result:             result,
 				QuotaPlatform:      quotaPlatform,
-				APIKey:             apiKey,
-				User:               apiKey.User,
+				APIKey:             currentAPIKey,
+				User:               currentAPIKey.User,
 				Account:            account,
 				Subscription:       subscription,
 				PricingAt:          pricingAt,

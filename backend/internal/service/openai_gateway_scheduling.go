@@ -1546,8 +1546,16 @@ func (s *OpenAIGatewayService) newSelectionResult(ctx context.Context, account *
 	if err != nil {
 		return nil, err
 	}
+	group := resolvedGroupFromContext(ctx)
+	var groupID *int64
+	if group != nil {
+		gid := group.ID
+		groupID = &gid
+	}
 	return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 		Account:     hydrated,
+		GroupID:     groupID,
+		Group:       group,
 		Acquired:    acquired,
 		ReleaseFunc: release,
 		WaitPlan:    waitPlan,

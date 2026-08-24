@@ -26,11 +26,11 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	requestStart := time.Now()
 
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
-	if !ok || apiKey.Group == nil {
+	if !ok || apiKey == nil {
 		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
 		return
 	}
-	if apiKey.Group.Platform != service.PlatformOpenAI && apiKey.Group.Platform != service.PlatformComposite {
+	if !service.APIKeyHasCandidateGroup(apiKey, service.PlatformOpenAI) && (apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite) {
 		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Codex alpha search is only available for OpenAI and Composite groups")
 		return
 	}
@@ -87,8 +87,8 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		return
 	}
 
-	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, requestedModel)
-	forwardBody := openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
+	channelMapping := service.ChannelMappingResult{}
+	forwardBody := body
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 
@@ -98,15 +98,6 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	}
 	if userRelease != nil {
 		defer userRelease()
-	}
-
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.errorResponse(c, status, code, message)
-		return
 	}
 
 	searchID := strings.TrimSpace(gjson.GetBytes(body, "id").String())
@@ -124,9 +115,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	c.Request = c.Request.WithContext(asPricingCtx)
 
 	for {
-		selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
+		resolvedSelection, _, err := h.gatewayService.SelectOpenAIAccountWithSchedulerForAPIKey(
 			c.Request.Context(),
-			apiKey.GroupID,
+			apiKey,
 			"",
 			sessionHash,
 			requestedModel,
@@ -134,10 +125,15 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			service.OpenAIUpstreamTransportHTTPSSE,
 			service.OpenAIEndpointCapabilityAlphaSearch,
 			false,
-			false,
-			false,
 			service.PlatformOpenAI,
+			false,
+			false,
 		)
+		selection := (*service.AccountSelectionResult)(nil)
+		currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+		if resolvedSelection != nil {
+			selection = resolvedSelection.Selection
+		}
 		if err != nil || selection == nil || selection.Account == nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai_alpha_search.account_select_aborted_client_disconnected", zap.Error(err))
@@ -156,6 +152,20 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			} else {
 				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
 			}
+			return
+		}
+		apiKey = currentAPIKey
+		channelMapping, _ = h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, requestedModel)
+		forwardBody = openAIModelMappedBody(body, channelMapping.Mapped, channelMapping.MappedModel, h.gatewayService.ReplaceModelInBody)
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.errorResponse(c, status, code, message)
 			return
 		}
 

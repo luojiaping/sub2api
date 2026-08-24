@@ -27,7 +27,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		return
 	}
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
-	if !ok || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformGrok {
+	if !ok || apiKey == nil || !service.APIKeyHasCandidateGroup(apiKey, service.PlatformGrok) {
 		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Realtime API is not supported for this platform")
 		return
 	}
@@ -35,18 +35,9 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		return
 	}
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.errorResponse(c, status, code, message)
-		return
-	}
-
-	selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
+	resolvedSelection, _, err := h.gatewayService.SelectOpenAIAccountWithSchedulerForAPIKey(
 		c.Request.Context(),
-		apiKey.GroupID,
+		apiKey,
 		"",
 		"",
 		"grok-4.5",
@@ -55,12 +46,26 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		// Grok only advertises chat_completions + media capabilities on HEAD.
 		service.OpenAIEndpointCapabilityChatCompletions,
 		false,
-		false,
-		false,
 		service.PlatformGrok,
+		false,
+		false,
 	)
+	selection := (*service.AccountSelectionResult)(nil)
+	currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+	if resolvedSelection != nil {
+		selection = resolvedSelection.Selection
+	}
 	if err != nil || selection == nil || selection.Account == nil {
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
+		return
+	}
+	apiKey = currentAPIKey
+	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+		status, code, message, retryAfter := billingErrorDetails(err)
+		if retryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+		}
+		h.errorResponse(c, status, code, message)
 		return
 	}
 
@@ -131,7 +136,7 @@ func isExpectedGrokRealtimeClose(err error) bool {
 // GrokVoice handles xAI Voice HTTP endpoints. endpoint is "tts", "stt", or "custom-voices".
 func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
-	if !ok || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformGrok {
+	if !ok || apiKey == nil || !service.APIKeyHasCandidateGroup(apiKey, service.PlatformGrok) {
 		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Voice API is not supported for this platform")
 		return
 	}
@@ -139,15 +144,6 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		return
 	}
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.errorResponse(c, status, code, message)
-		return
-	}
-
 	body, err := readGrokVoiceGatewayBody(c)
 	if err != nil {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -182,9 +178,9 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	selectionModel := "grok-4.5"
 
 	for attempts := 0; attempts < 4; attempts++ {
-		selection, _, selectErr := h.gatewayService.SelectAccountWithSchedulerForCapability(
+		resolvedSelection, _, selectErr := h.gatewayService.SelectOpenAIAccountWithSchedulerForAPIKey(
 			c.Request.Context(),
-			apiKey.GroupID,
+			apiKey,
 			"",
 			"",
 			selectionModel,
@@ -192,16 +188,30 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.OpenAIUpstreamTransportHTTPSSE,
 			service.OpenAIEndpointCapabilityChatCompletions,
 			false,
-			false,
-			false,
 			service.PlatformGrok,
+			false,
+			false,
 		)
+		selection := (*service.AccountSelectionResult)(nil)
+		currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+		if resolvedSelection != nil {
+			selection = resolvedSelection.Selection
+		}
 		if selectErr != nil || selection == nil || selection.Account == nil {
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
 			} else {
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available Grok accounts")
 			}
+			return
+		}
+		apiKey = currentAPIKey
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.errorResponse(c, status, code, message)
 			return
 		}
 		account := selection.Account

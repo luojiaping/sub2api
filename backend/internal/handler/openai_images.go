@@ -95,12 +95,12 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		zap.String("img_size", parsed.Size),
 	)
 
-	if !service.GroupAllowsImageGeneration(apiKey.Group) {
-		h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
-		return
-	}
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIImages, requestModel, parsed.ModerationBody()); decision != nil && !decision.AllowNextStage {
 		h.openAISecurityAuditError(c, decision)
+		return
+	}
+	if group := singleOpenAICompatibleCandidateGroup(apiKey, service.PlatformOpenAI); group != nil && !service.GroupAllowsImageGeneration(group) {
+		h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
 	imageReleaseFunc, acquired := h.acquireImageGenerationSlot(c, streamStarted)
@@ -115,7 +115,6 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(parsed.Stream, false)))
 
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, routingModel)
-
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
 	}
@@ -131,16 +130,6 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	}
 	if userReleaseFunc != nil {
 		defer userReleaseFunc()
-	}
-
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.images.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
-		return
 	}
 
 	sessionHash := h.gatewayService.GenerateExplicitSessionHash(c, body)
@@ -159,14 +148,19 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 
 	for {
 		reqLog.Debug("openai.images.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
-		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForImages(
+		resolvedSelection, scheduleDecision, err := h.gatewayService.SelectOpenAIAccountWithSchedulerForImagesAPIKey(
 			requestCtx,
-			apiKey.GroupID,
+			apiKey,
 			sessionHash,
 			routingModel,
 			failedAccountIDs,
 			parsed.RequiredCapability,
 		)
+		var selection *service.AccountSelectionResult
+		currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+		if resolvedSelection != nil {
+			selection = resolvedSelection.Selection
+		}
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai.images.account_select_aborted_client_disconnected", zap.Error(err))
@@ -205,6 +199,27 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				message = "No available compatible accounts"
 			}
 			h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+			return
+		}
+		apiKey = currentAPIKey
+		if !service.GroupAllowsImageGeneration(currentAPIKey.Group) {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			h.handleStreamingAwareError(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage(), streamStarted)
+			return
+		}
+		channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), currentAPIKey.GroupID, requestModel)
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), currentAPIKey.User, currentAPIKey, currentAPIKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), currentAPIKey)); err != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			reqLog.Info("openai.images.billing_eligibility_check_failed", zap.Error(err), zap.Any("group_id", currentAPIKey.GroupID))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.handleStreamingAwareError(c, status, code, message, streamStarted)
 			return
 		}
 
@@ -379,7 +394,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		}
 		inboundEndpoint := GetInboundEndpoint(c)
 		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
-		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+		quotaPlatform := service.QuotaPlatform(c.Request.Context(), currentAPIKey)
 
 		upstreamModel := ""
 		if result != nil {
@@ -389,8 +404,8 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		h.submitMandatoryUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
-				APIKey:             apiKey,
-				User:               apiKey.User,
+				APIKey:             currentAPIKey,
+				User:               currentAPIKey.User,
 				Account:            account,
 				Subscription:       subscription,
 				InboundEndpoint:    inboundEndpoint,
@@ -406,9 +421,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				logger.L().With(
 					zap.String("component", "handler.openai_gateway.images"),
 					zap.Int64("user_id", subject.UserID),
-					zap.Int64("api_key_id", apiKey.ID),
-					zap.Any("group_id", apiKey.GroupID),
-					zap.String("model", clientRequestModel),
+					zap.Int64("api_key_id", currentAPIKey.ID),
+					zap.Any("group_id", currentAPIKey.GroupID),
+					zap.String("model", requestModel),
 					zap.Int64("account_id", account.ID),
 				).Error("openai.images.record_usage_failed", zap.Error(err))
 			}

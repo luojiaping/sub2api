@@ -204,12 +204,6 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 		zap.Any("group_id", apiKey.GroupID),
 	)
 
-	if !allowOpenAICompatibleMessagesDispatch(c, apiKey) {
-		h.anthropicErrorResponse(c, http.StatusForbidden, "permission_error",
-			"This group does not allow /v1/messages dispatch")
-		return
-	}
-
 	if !h.ensureResponsesDependencies(c, reqLog) {
 		return
 	}
@@ -256,19 +250,9 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, false)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(false, false)))
 
-	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
 	mappedBodyForMessages := newOpenAIModelMappedBodyCache(body, h.gatewayService.ReplaceModelInBody)
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai_count_tokens.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.anthropicErrorResponse(c, status, code, message)
-		return
-	}
 
 	requestStart := time.Now()
 	// count_tokens 不计费：显式豁免利润门，避免高倍率账号池被门排除后连
@@ -276,12 +260,9 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	c.Request = c.Request.WithContext(service.WithOpenAIProfitControlSuppressed(c.Request.Context()))
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	currentRoutingModel := routingModel
-	if preferredMappedModel != "" {
-		currentRoutingModel = preferredMappedModel
-	}
-	selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
+	resolvedSelection, _, err := h.gatewayService.SelectOpenAIAccountWithSchedulerForAPIKey(
 		c.Request.Context(),
-		apiKey.GroupID,
+		apiKey,
 		"",
 		sessionHash,
 		currentRoutingModel,
@@ -289,13 +270,18 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 		service.OpenAIUpstreamTransportAny,
 		service.OpenAIEndpointCapabilityChatCompletions,
 		false,
+		openAICompatibleRequestPlatform(c.Request.Context(), apiKey, routePlatformIntent(c)),
 		false,
 		false,
-		openAICompatibleRequestPlatform(c.Request.Context(), apiKey),
 	)
+	var selection *service.AccountSelectionResult
+	currentAPIKey := resolvedAPIKeyOrOriginal(resolvedSelection, apiKey)
+	if resolvedSelection != nil {
+		selection = resolvedSelection.Selection
+	}
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	if err != nil {
-		requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+		requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey, routePlatformIntent(c))
 		reqLog.Warn("openai_count_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
 		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 		if !cls.ModelNotFound {
@@ -312,14 +298,35 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 		h.anthropicErrorResponse(c, cls.Status, cls.ErrType, cls.Message)
 		return
 	}
+	if !allowOpenAICompatibleMessagesDispatch(c, currentAPIKey) {
+		if selection.Acquired && selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		h.anthropicErrorResponse(c, http.StatusForbidden, "permission_error",
+			"This group does not allow /v1/messages dispatch")
+		return
+	}
+	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), currentAPIKey.User, currentAPIKey, currentAPIKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), currentAPIKey)); err != nil {
+		if selection.Acquired && selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		reqLog.Info("openai_count_tokens.billing_eligibility_check_failed", zap.Error(err), zap.Any("group_id", currentAPIKey.GroupID))
+		status, code, message, retryAfter := billingErrorDetails(err)
+		if retryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+		}
+		h.anthropicErrorResponse(c, status, code, message)
+		return
+	}
 
 	account := selection.Account
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	if selection.Acquired && selection.ReleaseFunc != nil {
 		defer selection.ReleaseFunc()
 	}
+	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), currentAPIKey.GroupID, reqModel)
 	forwardBody := mappedBodyForMessages(channelMapping.Mapped, channelMapping.MappedModel)
-	defaultMappedModel := preferredMappedModel
+	defaultMappedModel := resolveOpenAIMessagesDispatchMappedModel(currentAPIKey, reqModel)
 
 	if err := h.gatewayService.ForwardCountTokensAsAnthropic(c.Request.Context(), c, account, forwardBody, defaultMappedModel); err != nil {
 		reqLog.Error("openai_count_tokens.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
