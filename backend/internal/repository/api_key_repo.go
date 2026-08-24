@@ -114,19 +114,6 @@ func (r *apiKeyRepository) withLoadedGroups(q *dbent.APIKeyQuery) *dbent.APIKeyQ
 	})
 }
 
-func (r *apiKeyRepository) withAuthLoadedGroups(q *dbent.APIKeyQuery) *dbent.APIKeyQuery {
-	return q.WithGroup(func(gq *dbent.GroupQuery) {
-		selectAuthGroupFields(gq)
-	}).WithGroups(func(gq *dbent.GroupQuery) {
-		selectAuthGroupFields(gq)
-		gq.Order(dbent.Asc(group.FieldID))
-	}).WithAPIKeyGroups(func(bg *dbent.APIKeyGroupQuery) {
-		bg.Order(apikeygroup.ByPriority(), apikeygroup.ByGroupID()).WithGroup(func(gq *dbent.GroupQuery) {
-			selectAuthGroupFields(gq)
-		})
-	})
-}
-
 func selectAuthGroupFields(q *dbent.GroupQuery) {
 	q.Select(
 		group.FieldID,
@@ -1145,10 +1132,11 @@ func (r *apiKeyRepository) replaceGroupBindings(ctx context.Context, apiKeyID in
 	}
 	creates := make([]*dbent.APIKeyGroupCreate, 0, len(groupIDs))
 	for _, groupID := range groupIDs {
-		creates = append(creates, client.APIKeyGroup.Create().
+		create := client.APIKeyGroup.Create().
 			SetAPIKeyID(apiKeyID).
 			SetGroupID(groupID).
-			SetPriority(len(creates) + 1))
+			SetPriority(len(creates) + 1)
+		creates = append(creates, create)
 	}
 	return client.APIKeyGroup.CreateBulk(creates...).OnConflict().DoNothing().Exec(ctx)
 }

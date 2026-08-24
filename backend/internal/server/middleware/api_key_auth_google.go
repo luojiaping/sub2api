@@ -124,7 +124,8 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			return
 		}
 		// 专属分组授权校验：用户对该专属分组的授权被撤销后应拒绝（与主中间件一致，防止越权）。
-		if !authorizeAPIKeyGroups(c, apiKey, subscriptionService) {
+		billingInfoRequest := c.Request.URL.Path == "/v1/sub2api/billing"
+		if !authorizeAPIKeyGroups(c, apiKey, subscriptionService, cfg.RunMode == config.RunModeSimple || billingInfoRequest) {
 			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonAPIKeyGroupUnavailable)
 			MarkIngressRejected(c, IngressRejectGroupNotAllowed)
 			abortWithGoogleError(c, 403, "API Key 所属专属分组不再允许当前用户使用")

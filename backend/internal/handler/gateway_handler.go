@@ -1260,7 +1260,6 @@ func groupsSharePlatform(groups []service.Group, platform string) bool {
 	return true
 }
 
-
 func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
 	if platform == service.PlatformGrok {
 		writeGrokModelsList(c, modelIDs)

@@ -808,11 +808,6 @@ func isOpenAICompatibleRoutePlatform(platform string) bool {
 	}
 }
 
-func requestModelLooksOpenAICompatible(c *gin.Context) bool {
-	model := normalizedRequestModel(c)
-	return requestModelLooksOpenAI(model) || requestModelLooksGrok(model)
-}
-
 func normalizedRequestModel(c *gin.Context) string {
 	return strings.ToLower(strings.TrimSpace(peekJSONRequestModel(c)))
 }

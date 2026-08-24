@@ -1192,15 +1192,14 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupIDs(ctx context.Context, keyID 
 		if len(exclusiveStandardGroups) > 0 {
 			opCtx := ctx
 			var tx *dbent.Tx
-			if s.entClient == nil {
-				return nil, fmt.Errorf("entClient is nil, cannot atomically grant exclusive group access")
+			if s.entClient != nil {
+				tx, err = s.entClient.Tx(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("begin transaction: %w", err)
+				}
+				defer func() { _ = tx.Rollback() }()
+				opCtx = dbent.NewTxContext(ctx, tx)
 			}
-			tx, err = s.entClient.Tx(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("begin transaction: %w", err)
-			}
-			defer func() { _ = tx.Rollback() }()
-			opCtx = dbent.NewTxContext(ctx, tx)
 			for i := range exclusiveStandardGroups {
 				group := exclusiveStandardGroups[i]
 				if err := s.userRepo.AddGroupToAllowedGroups(opCtx, apiKey.UserID, group.ID); err != nil {
@@ -1212,8 +1211,10 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupIDs(ctx context.Context, keyID 
 			if err := s.apiKeyRepo.Update(opCtx, apiKey, APIKeyUpdateFields{GroupID: true}); err != nil {
 				return nil, fmt.Errorf("update api key: %w", err)
 			}
-			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("commit transaction: %w", err)
+			if tx != nil {
+				if err := tx.Commit(); err != nil {
+					return nil, fmt.Errorf("commit transaction: %w", err)
+				}
 			}
 			result.AutoGrantedGroupAccess = true
 			if len(result.GrantedGroupIDs) > 0 {

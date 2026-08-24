@@ -169,8 +169,6 @@ func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecord
 		task(usageRecordContext(parent, ctx))
 	}
 }
-
-
 func routePlatformIntent(c *gin.Context) string {
 	platform, _ := middleware2.GetRoutePlatformIntentFromContext(c)
 	return strings.TrimSpace(platform)
@@ -1905,8 +1903,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	cyberBlockedThisConn := false
 
 	// 解析渠道级模型映射
-	channelMappingWS := service.ChannelMappingResult{}
-
 	var currentUserRelease func()
 	var currentAccountRelease func()
 	releaseAccountSlot := func() {
@@ -2087,7 +2083,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
 			return
 		}
-		channelMappingWS, _ = h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
+		channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, reqModel)
 
 		account := selection.Account
 		accountMaxConcurrency := account.Concurrency

@@ -160,12 +160,12 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		if abortIfAPIKeyGroupUnavailable(c, apiKey) {
 			return
 		}
-		if abortIfAPIKeyGroupNotAllowed(c, apiKey, subscriptionService) {
+		billingInfoRequest := c.Request.URL.Path == "/v1/sub2api/billing"
+		if abortIfAPIKeyGroupNotAllowed(c, apiKey, subscriptionService, cfg.RunMode == config.RunModeSimple || billingInfoRequest) {
 			return
 		}
 		ctx := context.WithValue(c.Request.Context(), ctxkey.UserID, apiKey.User.ID)
 		c.Request = c.Request.WithContext(ctx)
-		billingInfoRequest := c.Request.URL.Path == "/v1/sub2api/billing"
 		// Async image task polling only reads data that already belongs to the
 		// authenticated key and must remain available after the completed
 		// generation consumes the key's remaining balance.
@@ -413,8 +413,8 @@ func abortIfAPIKeyGroupUnavailable(c *gin.Context, apiKey *service.APIKey) bool 
 	return true
 }
 
-func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey, subscriptionService *service.SubscriptionService) bool {
-	if authorizeAPIKeyGroups(c, apiKey, subscriptionService) {
+func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey, subscriptionService *service.SubscriptionService, skipSubscriptionCheck bool) bool {
+	if authorizeAPIKeyGroups(c, apiKey, subscriptionService, skipSubscriptionCheck) {
 		return false
 	}
 	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonAPIKeyGroupUnavailable)
@@ -423,27 +423,7 @@ func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey, subscr
 	return true
 }
 
-func validateAPIKeyGroupAllowed(apiKey *service.APIKey) bool {
-	if apiKey == nil || apiKey.User == nil {
-		return true
-	}
-	groups := service.APIKeyCandidateGroups(apiKey, "")
-	if len(groups) == 0 {
-		return apiKey.GroupID == nil && len(apiKey.GroupIDs) == 0 && apiKey.Group == nil && len(apiKey.Groups) == 0
-	}
-	for i := range groups {
-		group := &groups[i]
-		if !group.IsSubscriptionType() && apiKey.User.CanBindGroup(group.ID, group.IsExclusive) {
-			return true
-		}
-		if group.IsSubscriptionType() {
-			return true
-		}
-	}
-	return false
-}
-
-func authorizeAPIKeyGroups(c *gin.Context, apiKey *service.APIKey, subscriptionService *service.SubscriptionService) bool {
+func authorizeAPIKeyGroups(c *gin.Context, apiKey *service.APIKey, subscriptionService *service.SubscriptionService, skipSubscriptionCheck bool) bool {
 	if apiKey == nil || apiKey.User == nil {
 		return true
 	}
@@ -459,6 +439,10 @@ func authorizeAPIKeyGroups(c *gin.Context, apiKey *service.APIKey, subscriptionS
 			continue
 		}
 		if group.IsSubscriptionType() {
+			if skipSubscriptionCheck {
+				authorized = append(authorized, group)
+				continue
+			}
 			if subscriptionService == nil {
 				continue
 			}
