@@ -1146,12 +1146,10 @@ func (r *apiKeyRepository) ensureGroupBinding(ctx context.Context, apiKeyID, gro
 		return nil
 	}
 	client := clientFromContext(ctx, r.client)
-	return client.APIKeyGroup.Create().
+	builder := client.APIKeyGroup.Create().
 		SetAPIKeyID(apiKeyID).
-		SetGroupID(groupID).
-		OnConflict().
-		DoNothing().
-		Exec(ctx)
+		SetGroupID(groupID)
+	return builder.OnConflict().DoNothing().Exec(ctx)
 }
 
 func userEntityToService(u *dbent.User) *service.User {

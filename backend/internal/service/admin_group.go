@@ -1134,7 +1134,6 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 	return s.AdminUpdateAPIKeyGroupIDs(ctx, keyID, &groupIDs)
 }
 
-
 // AdminUpdateAPIKeyGroupIDs 管理员修改 API Key 多分组绑定。
 // groupIDs: nil=不修改, 空数组=解绑全部, 非空=替换为目标分组集合。
 func (s *adminServiceImpl) AdminUpdateAPIKeyGroupIDs(ctx context.Context, keyID int64, groupIDs *[]int64) (*AdminUpdateAPIKeyGroupIDResult, error) {

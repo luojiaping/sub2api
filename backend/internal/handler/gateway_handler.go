@@ -1522,7 +1522,7 @@ func gatewayRequestPlatformForAPIKey(apiKey *service.APIKey, forcePlatform strin
 		return forced
 	}
 	if len(routePlatforms) > 0 {
-		if routePlatform := strings.TrimSpace(routePlatforms[0]); routePlatform != "" {
+		if routePlatform := strings.TrimSpace(routePlatforms[0]); routePlatform != "" && service.APIKeyHasCandidateGroup(apiKey, routePlatform) {
 			return routePlatform
 		}
 	}
