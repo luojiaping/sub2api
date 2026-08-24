@@ -219,6 +219,45 @@ func (s *GatewayService) SelectAccountForModelForAPIKey(
 	return nil, selectFallbackError(lastErr)
 }
 
+// SelectAccountForModelForAPIKey selects an OpenAI-compatible account from the
+// API key's bound groups without acquiring a concurrency slot.
+func (s *OpenAIGatewayService) SelectAccountForModelForAPIKey(
+	ctx context.Context,
+	apiKey *APIKey,
+	preferredPlatform string,
+	sessionHash string,
+	requestedModel string,
+	excludedIDs map[int64]struct{},
+) (*APIKeyAccountSelectionResult, error) {
+	if apiKey == nil {
+		return nil, ErrNoAvailableAccounts
+	}
+	groups := apiKeyCandidateGroups(apiKey, preferredPlatform)
+	if len(groups) == 0 {
+		account, err := s.SelectAccountForModelWithExclusions(ctx, apiKey.GroupID, sessionHash, requestedModel, excludedIDs)
+		if err != nil {
+			return nil, err
+		}
+		return resolvedAPIKeySelection(apiKey, &AccountSelectionResult{Account: account}, apiKey.Group), nil
+	}
+
+	var lastErr error
+	for i := range groups {
+		group := &groups[i]
+		groupID := group.ID
+		groupCtx := withResolvedGroupContext(ctx, group)
+		account, err := s.SelectAccountForModelWithExclusions(groupCtx, &groupID, sessionHash, requestedModel, excludedIDs)
+		if err == nil {
+			return resolvedAPIKeySelection(apiKey, &AccountSelectionResult{Account: account}, group), nil
+		}
+		lastErr = err
+		if !shouldTryNextAPIKeyGroup(err) {
+			return nil, err
+		}
+	}
+	return nil, selectFallbackError(lastErr)
+}
+
 // SelectOpenAIAccountWithSchedulerForAPIKey tries OpenAI-compatible bound
 // groups and delegates priority/load/failover decisions to the existing
 // per-group scheduler.
