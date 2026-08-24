@@ -453,6 +453,8 @@ type AdminUpdateAPIKeyGroupIDResult struct {
 	AutoGrantedGroupAccess bool   // true if a new exclusive group permission was auto-added
 	GrantedGroupID         *int64 // the group ID that was auto-granted
 	GrantedGroupName       string // the group name that was auto-granted
+	GrantedGroupIDs        []int64
+	GrantedGroupNames      []string
 }
 
 // ReplaceUserGroupResult 分组替换操作的结果

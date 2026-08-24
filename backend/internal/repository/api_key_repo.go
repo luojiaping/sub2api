@@ -339,8 +339,8 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 			bg.Order(apikeygroup.ByPriority(), apikeygroup.ByGroupID()).WithGroup(func(gq *dbent.GroupQuery) {
 				selectAuthGroupFields(gq)
 			})
-		}).
-		Only(ctx)
+		})
+	m, err := q.Only(ctx)
 	if err != nil {
 		if dbent.IsNotFound(err) {
 			return nil, service.ErrAPIKeyNotFound
