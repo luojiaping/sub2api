@@ -135,6 +135,41 @@ func TestGatewayRoutesPlatformIntentUsesModelAndEndpointForMultiGroupKeys(t *tes
 	})
 }
 
+func TestGatewayRoutesPlatformIntentRecognizesCNModelsForMultiGroupKeys(t *testing.T) {
+	openAIGroup := service.Group{ID: 20, Platform: service.PlatformOpenAI, Status: service.StatusActive, Hydrated: true}
+	deepseekGroup := service.Group{ID: 80, Platform: service.PlatformDeepseek, Status: service.StatusActive, Hydrated: true}
+	kimiGroup := service.Group{ID: 81, Platform: service.PlatformKimi, Status: service.StatusActive, Hydrated: true}
+	zhipuGroup := service.Group{ID: 82, Platform: service.PlatformZhipu, Status: service.StatusActive, Hydrated: true}
+
+	tests := []struct {
+		name     string
+		model    string
+		platform string
+		route    func(*gin.Context) string
+	}{
+		{name: "responses deepseek", model: "deepseek-v4-flash", platform: service.PlatformDeepseek, route: routePlatformForOpenAICompatibleEndpoint},
+		{name: "messages deepseek", model: "deepseek-v4-flash", platform: service.PlatformDeepseek, route: routePlatformForMessagesEndpoint},
+		{name: "count tokens deepseek", model: "deepseek-v4-flash", platform: service.PlatformDeepseek, route: routePlatformForCountTokensEndpoint},
+		{name: "responses kimi", model: "kimi-k2.6", platform: service.PlatformKimi, route: routePlatformForOpenAICompatibleEndpoint},
+		{name: "responses glm", model: "glm-5.2", platform: service.PlatformZhipu, route: routePlatformForOpenAICompatibleEndpoint},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newGatewayRoutesPlatformContext(
+				"/v1/responses",
+				`{"model":"`+tt.model+`","input":"hi"}`,
+				openAIGroup,
+				openAIGroup,
+				deepseekGroup,
+				kimiGroup,
+				zhipuGroup,
+			)
+			require.Equal(t, tt.platform, tt.route(c))
+		})
+	}
+}
+
 func TestGatewayRoutesOpenAIResponsesCompactPathIsRegistered(t *testing.T) {
 	router := newGatewayRoutesTestRouter()
 

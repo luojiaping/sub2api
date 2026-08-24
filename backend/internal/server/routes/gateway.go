@@ -724,6 +724,9 @@ func routePlatformForMessagesEndpoint(c *gin.Context) string {
 	if requestModelLooksGrok(model) && hasAPIKeyPlatform(c, service.PlatformGrok) {
 		return service.PlatformGrok
 	}
+	if platform := requestModelCNProviderPlatform(model); platform != "" && hasAPIKeyPlatform(c, platform) {
+		return platform
+	}
 	if requestModelLooksOpenAI(model) && hasAPIKeyPlatform(c, service.PlatformOpenAI) {
 		return service.PlatformOpenAI
 	}
@@ -747,6 +750,9 @@ func routePlatformForOpenAICompatibleEndpoint(c *gin.Context) string {
 	if requestModelLooksGrok(model) && hasAPIKeyPlatform(c, service.PlatformGrok) {
 		return service.PlatformGrok
 	}
+	if platform := requestModelCNProviderPlatform(model); platform != "" && hasAPIKeyPlatform(c, platform) {
+		return platform
+	}
 	if requestModelLooksOpenAI(model) && hasAPIKeyPlatform(c, service.PlatformOpenAI) {
 		return service.PlatformOpenAI
 	}
@@ -766,6 +772,9 @@ func routePlatformForCountTokensEndpoint(c *gin.Context) string {
 	model := normalizedRequestModel(c)
 	if requestModelLooksAnthropic(model) && hasAPIKeyPlatform(c, service.PlatformAnthropic) {
 		return service.PlatformAnthropic
+	}
+	if platform := requestModelCNProviderPlatform(model); platform != "" && hasAPIKeyPlatform(c, platform) {
+		return platform
 	}
 	if requestModelLooksOpenAI(model) && hasAPIKeyPlatform(c, service.PlatformOpenAI) {
 		return service.PlatformOpenAI
@@ -837,6 +846,21 @@ func requestModelLooksAnthropic(model string) bool {
 		strings.HasPrefix(model, "sonnet") ||
 		strings.HasPrefix(model, "opus") ||
 		strings.HasPrefix(model, "haiku")
+}
+
+func requestModelCNProviderPlatform(model string) string {
+	switch {
+	case strings.HasPrefix(model, "deepseek-") || strings.HasPrefix(model, "deepseek/"):
+		return service.PlatformDeepseek
+	case strings.HasPrefix(model, "kimi-") || strings.HasPrefix(model, "kimi/") ||
+		strings.HasPrefix(model, "moonshot-") || strings.HasPrefix(model, "moonshot/"):
+		return service.PlatformKimi
+	case strings.HasPrefix(model, "glm-") || strings.HasPrefix(model, "glm/") ||
+		strings.HasPrefix(model, "chatglm-") || strings.HasPrefix(model, "chatglm/"):
+		return service.PlatformZhipu
+	default:
+		return ""
+	}
 }
 
 func peekJSONRequestModel(c *gin.Context) string {
