@@ -467,6 +467,11 @@ func beginGroupUsageRollupTriggerTestTx(t *testing.T, ctx context.Context, schem
 
 	tx, err := integrationDB.BeginTx(ctx, nil)
 	require.NoError(t, err)
+	// The migration derives affected dates from the PostgreSQL session timezone.
+	// Pin integration transactions to the migration's default timezone so the
+	// assertions remain deterministic on runners whose database timezone is UTC.
+	_, err = tx.ExecContext(ctx, "SET LOCAL TIME ZONE 'Asia/Shanghai'")
+	require.NoError(t, err)
 	require.NoError(t, setGroupUsageRollupTriggerSearchPath(ctx, tx, pq.QuoteIdentifier(schema)))
 	return tx
 }
