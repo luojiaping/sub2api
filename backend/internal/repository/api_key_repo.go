@@ -446,12 +446,16 @@ func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey, fiel
 		// 更新影响行数为 0，说明记录不存在或已被软删除。
 		return service.ErrAPIKeyNotFound
 	}
-	if key.GroupIDs != nil {
-		if err := r.replaceGroupBindings(txCtx, key.ID, key.GroupIDs); err != nil {
-			return err
-		}
-	} else if key.GroupID != nil {
-		if err := r.ensureGroupBinding(txCtx, key.ID, *key.GroupID); err != nil {
+	if fields.GroupID {
+		if key.GroupID == nil {
+			if err := r.replaceGroupBindings(txCtx, key.ID, nil); err != nil {
+				return err
+			}
+		} else if key.GroupIDs != nil {
+			if err := r.replaceGroupBindings(txCtx, key.ID, key.GroupIDs); err != nil {
+				return err
+			}
+		} else if err := r.ensureGroupBinding(txCtx, key.ID, *key.GroupID); err != nil {
 			return err
 		}
 	}
