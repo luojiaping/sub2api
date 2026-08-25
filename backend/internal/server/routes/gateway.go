@@ -122,7 +122,9 @@ func RegisterGatewayRoutes(
 		return platform == service.PlatformOpenAI
 	}
 	videoGenerationHandler := func(c *gin.Context) {
-		if hasAPIKeyPlatform(c, service.PlatformGrok) {
+		// Composite groups may resolve their video request to Grok at the
+		// account-selection layer, so task creation must accept that target too.
+		if hasAPIKeyPlatform(c, service.PlatformGrok) || getGroupPlatform(c) == service.PlatformGrok || getGroupPlatform(c) == service.PlatformComposite {
 			middleware.SetRoutePlatformIntent(c, service.PlatformGrok)
 			h.OpenAIGateway.GrokVideoGeneration(c)
 			return

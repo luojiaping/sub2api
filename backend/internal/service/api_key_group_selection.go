@@ -258,6 +258,46 @@ func (s *OpenAIGatewayService) SelectAccountForModelForAPIKey(
 	return nil, selectFallbackError(lastErr)
 }
 
+// SelectAccountForTokenCountForAPIKey selects a non-billable token-count
+// account from the API key's bound groups without acquiring a generation slot.
+func (s *OpenAIGatewayService) SelectAccountForTokenCountForAPIKey(
+	ctx context.Context,
+	apiKey *APIKey,
+	preferredPlatform string,
+	sessionHash string,
+	requestedModel string,
+	requiredCapability OpenAIEndpointCapability,
+) (*APIKeyAccountSelectionResult, error) {
+	if apiKey == nil {
+		return nil, ErrNoAvailableAccounts
+	}
+	preferredPlatform = NormalizeOpenAICompatiblePlatform(preferredPlatform)
+	groups := apiKeyCandidateGroups(apiKey, preferredPlatform)
+	if len(groups) == 0 {
+		account, err := s.SelectAccountForTokenCount(ctx, apiKey.GroupID, sessionHash, requestedModel, requiredCapability, preferredPlatform)
+		if err != nil {
+			return nil, err
+		}
+		return resolvedAPIKeySelection(apiKey, &AccountSelectionResult{Account: account}, apiKey.Group), nil
+	}
+
+	var lastErr error
+	for i := range groups {
+		group := &groups[i]
+		groupID := group.ID
+		groupCtx := withResolvedGroupContext(ctx, group)
+		account, err := s.SelectAccountForTokenCount(groupCtx, &groupID, sessionHash, requestedModel, requiredCapability, preferredPlatform)
+		if err == nil {
+			return resolvedAPIKeySelection(apiKey, &AccountSelectionResult{Account: account}, group), nil
+		}
+		lastErr = err
+		if !shouldTryNextAPIKeyGroup(err) {
+			return nil, err
+		}
+	}
+	return nil, selectFallbackError(lastErr)
+}
+
 // SelectOpenAIAccountWithSchedulerForAPIKey tries OpenAI-compatible bound
 // groups and delegates priority/load/failover decisions to the existing
 // per-group scheduler.
