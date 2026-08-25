@@ -76,10 +76,8 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
 	routingModel := reqModel
-	forwardBody := body
 	if channelMapping.Mapped {
 		routingModel = channelMapping.MappedModel
-		forwardBody = h.gatewayService.ReplaceModelInBody(body, routingModel)
 	}
 
 	// Token counting is not billed, so it must not be excluded by the profit gate.
