@@ -61,11 +61,13 @@ jobs:
           BUILD_DATE: ${{ github.event.head_commit.timestamp || '' }}
         run: |
           mkdir -p dist
+          VERSION="$(tr -d '\r\n' < cmd/server/VERSION)"
+          test -n "$VERSION"
           if [ -z "$BUILD_DATE" ]; then BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
             -tags=embed \
             -trimpath \
-            -ldflags="-s -w -X main.Version=0.1.179-fast-alias -X main.Commit=${GITHUB_SHA} -X main.Date=${BUILD_DATE} -X main.BuildType=custom" \
+            -ldflags="-s -w -X main.Version=${VERSION}-fast-alias -X main.Commit=${GITHUB_SHA} -X main.Date=${BUILD_DATE} -X main.BuildType=custom" \
             -o dist/sub2api \
             ./cmd/server
           sha256sum dist/sub2api > dist/sub2api.sha256
