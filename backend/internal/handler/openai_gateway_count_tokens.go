@@ -130,7 +130,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 
 	account := selection.Account
 	channelMapping, _ = h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
-	forwardBody = body
+	forwardBody := body
 	if channelMapping.Mapped {
 		routingModel = channelMapping.MappedModel
 		forwardBody = h.gatewayService.ReplaceModelInBody(body, routingModel)
