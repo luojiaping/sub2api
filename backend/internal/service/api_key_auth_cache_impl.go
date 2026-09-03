@@ -15,7 +15,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 21 // v21: include multi-group API key bindings
+const apiKeyAuthSnapshotVersion = 23 // v23: multi-group bindings + group force/free fast fields
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -439,11 +439,14 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			SupportedModelScopes:            apiKey.Group.SupportedModelScopes,
 			AllowMessagesDispatch:           apiKey.Group.AllowMessagesDispatch,
 			AllowLive:                       apiKey.Group.AllowLive,
+			ForceOpenAIFast:                 apiKey.Group.ForceOpenAIFast,
+			FreeOpenAIFast:                  apiKey.Group.FreeOpenAIFast,
 			DefaultMappedModel:              apiKey.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     apiKey.Group.MessagesDispatchModelConfig,
 			ModelsListConfig:                apiKey.Group.ModelsListConfig,
 			RPMLimit:                        apiKey.Group.RPMLimit,
 			MaxReasoningEffort:              apiKey.Group.MaxReasoningEffort,
+			MaxReasoningEffortOverLimit:     apiKey.Group.MaxReasoningEffortOverLimit,
 			ReasoningEffortMappings:         apiKey.Group.ReasoningEffortMappings,
 			PeakRateEnabled:                 apiKey.Group.PeakRateEnabled,
 			PeakStart:                       apiKey.Group.PeakStart,
@@ -561,11 +564,14 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			SupportedModelScopes:            snapshot.Group.SupportedModelScopes,
 			AllowMessagesDispatch:           snapshot.Group.AllowMessagesDispatch,
 			AllowLive:                       snapshot.Group.AllowLive,
+			ForceOpenAIFast:                 snapshot.Group.ForceOpenAIFast,
+			FreeOpenAIFast:                  snapshot.Group.FreeOpenAIFast,
 			DefaultMappedModel:              snapshot.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     snapshot.Group.MessagesDispatchModelConfig,
 			ModelsListConfig:                snapshot.Group.ModelsListConfig,
 			RPMLimit:                        snapshot.Group.RPMLimit,
 			MaxReasoningEffort:              snapshot.Group.MaxReasoningEffort,
+			MaxReasoningEffortOverLimit:     snapshot.Group.MaxReasoningEffortOverLimit,
 			ReasoningEffortMappings:         snapshot.Group.ReasoningEffortMappings,
 			PeakRateEnabled:                 snapshot.Group.PeakRateEnabled,
 			PeakStart:                       snapshot.Group.PeakStart,
@@ -653,6 +659,8 @@ func authGroupSnapshotFromService(group *Group) APIKeyAuthGroupSnapshot {
 		RPMLimit:                        group.RPMLimit,
 		MaxReasoningEffort:              group.MaxReasoningEffort,
 		ReasoningEffortMappings:         group.ReasoningEffortMappings,
+		ForceOpenAIFast:                 group.ForceOpenAIFast,
+		FreeOpenAIFast:                  group.FreeOpenAIFast,
 		PeakRateEnabled:                 group.PeakRateEnabled,
 		PeakStart:                       group.PeakStart,
 		PeakEnd:                         group.PeakEnd,
@@ -714,6 +722,8 @@ func authGroupFromSnapshot(snapshot *APIKeyAuthGroupSnapshot) *Group {
 		RPMLimit:                        snapshot.RPMLimit,
 		MaxReasoningEffort:              snapshot.MaxReasoningEffort,
 		ReasoningEffortMappings:         snapshot.ReasoningEffortMappings,
+		ForceOpenAIFast:                 snapshot.ForceOpenAIFast,
+		FreeOpenAIFast:                  snapshot.FreeOpenAIFast,
 		PeakRateEnabled:                 snapshot.PeakRateEnabled,
 		PeakStart:                       snapshot.PeakStart,
 		PeakEnd:                         snapshot.PeakEnd,
